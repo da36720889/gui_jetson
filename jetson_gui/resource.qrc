@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/new/prefix1">
+        <file alias="goblin">full.png</file>
+    </qresource>
+</RCC>
