@@ -1,0 +1,81 @@
+# Qt Build Files
+build/
+*.pro.user
+*.pro.user.*
+Makefile
+Makefile.*
+ui_*.h
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+*.moc
+
+# Compiled Object files
+*.o
+*.obj
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+*.lib
+
+# Executables
+*.exe
+jetson_gui
+*.app
+*.out
+
+# Qt Creator
+*.autosave
+*.pro.user.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.whl
+*.egg
+*.egg-info/
+dist/
+build/
+*.egg-info
+
+# Virtual Environment
+workspace/Inference/new-env/
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Profiling and Debug
+*.nsys-rep
+*.prof
+*.pdb
+*.dSYM/
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+*.cache
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+

@@ -3,20 +3,13 @@
 #include "include/cyusb.h"
 #include <QDebug>
 #include <QMessageBox>
-#include "include/cyusb.h"
 #include <cstring>
+#include <QTime>
+#include <QtGlobal>
+#include <QDir>
+#include <QFileInfo>
+#include <cmath>
 
-// 2025/02/15 - diplay_1
-// 2025/02/16 - diplay_2
-
-// int GUI_display_height = 1000;
-// int GUI_display_width = 2048;
-
-// MainWindow::MainWindow(QWidget *parent)
-//     : QMainWindow(parent), ui(new Ui::MainWindow),
-//       m_workerMutex(QMutex::NonRecursive), m_loopMutex(QMutex::NonRecursive),
-//       currentScene(new QGraphicsScene(this)), m_display2Scene(new QGraphicsScene(this)),
-//       m_display3Scene(new QGraphicsScene(this)), h(nullptr)
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent),
       ui(new Ui::MainWindow),
@@ -30,7 +23,7 @@ MainWindow::MainWindow(QWidget *parent)
       m_loopRunning(false),
       m_stopRequested(false),
       m_loopMutex(QMutex::NonRecursive),
-      m_worker(nullptr),
+      scanningThread(nullptr),
       h(nullptr),
       m_workerMutex(QMutex::NonRecursive)
 {
@@ -116,46 +109,92 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->rb_3d, &QRadioButton::clicked, this, &MainWindow::rb_3d_clicked);
     connect(ui->rb_cross, &QRadioButton::clicked, this, &MainWindow::rb_cross_clicked);
     connect(ui->rb_wang, &QRadioButton::clicked, this, &MainWindow::rb_wang_clicked);
+
+    
+    // **************** python fastapi ************************* //
+    pythonFastApi = new QProcess(this);
+    pythonFastApi->start("python3", QStringList() << "workspace/Inference/eval_fastapi_bin.py");
+
+    connect(pythonFastApi, &QProcess::readyReadStandardOutput, [=]() {
+        QByteArray output = pythonFastApi->readAllStandardOutput();
+        qDebug() << "[Python STDOUT]" << output.trimmed();
+    });
+
+    connect(pythonFastApi, &QProcess::readyReadStandardError, [=]() {
+        QByteArray error = pythonFastApi->readAllStandardError();
+        qWarning() << "[Python STDERR]" << error.trimmed();
+    });
+
+    connect(pythonFastApi, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            [=](int exitCode, QProcess::ExitStatus status) {
+                qDebug() << "[Python Process Finished] Exit code:" << exitCode << ", Status:" << status;
+            });
+
+    pythonFastApi->start();
+
+    if (!pythonFastApi->waitForStarted(1000000)) {
+        qCritical() << "[ERROR] Failed to start eval_fastapi_bin.py";
+    } else {
+        qDebug() << "[INFO] Background Python process started.";
+    }
 }
 
 MainWindow::~MainWindow()
 {
-    if (m_worker)
+    if (scanningThread)
     {
-        m_worker->stop();
-        m_worker->wait();
-        delete m_worker;
+        scanningThread->stop();
+        scanningThread->wait();
+        delete scanningThread;
+        scanningThread = nullptr;
+    }
+    if (captureThread)
+    {
+        captureThread->stop();
+        captureThread->wait();
+        delete captureThread;
+        captureThread = nullptr;
     }
     if (h)
     {
         cyusb_release_interface(h, 0);
         cyusb_close();
+        h = nullptr;
+    }
+    if (pythonFastApi)
+    {
+        pythonFastApi->kill();  
+        pythonFastApi->waitForFinished(5000);
+        delete pythonFastApi;
+        pythonFastApi = nullptr;
     }
     delete ui;
 }
 
-WorkerThread::WorkerThread(cyusb_handle *usbHandle, MainWindow *parent)
-    : QThread(parent), m_stop(false), m_usbHandle(usbHandle), m_parent(parent) {}
+StartThread::StartThread(cyusb_handle *usbHandle, MainWindow *mainwindow)
+    : QThread(mainwindow), m_stop(false), m_usbHandle(usbHandle), m_mainwindow(mainwindow) {}
 
-void WorkerThread::stop()
+void StartThread::stop()
 {
     m_stop = true;
-    qDebug() << "WorkerThread stop requested";
+    qDebug() << "StartThread stop requested";
 }
 
-void WorkerThread::run()
+void StartThread::run()
 {
-    const QByteArray ABOIL = QByteArray::fromHex("41424F494C00000A");
+    QByteArray scan_2d = QByteArray::fromHex("4D454D5300000011"); // 0x4D, 0x45, 0x4D, 0x53, mode, Range, Filp, Scan
     unsigned char out_endpoint = 0x01;
-    unsigned char in_endpoint = 0x81;
-    const size_t buffer_size = 4096 * 1000;
-    unsigned char *aligned_chunk = static_cast<unsigned char *>(aligned_alloc(64, buffer_size));
+    int transferred_o_scan = 0;
+    int scan_2d_o = cyusb_bulk_transfer(m_usbHandle, out_endpoint, (unsigned char *)scan_2d.constData(), scan_2d.size(), &transferred_o_scan, 3000);
 
-    qDebug() << "WorkerThread started";
+    const QByteArray ABOIL = QByteArray::fromHex("41424F494C000014");
+    unsigned char in_endpoint = 0x81;
+    std::vector<unsigned char> chunk(4096 * 1000);
+    qDebug() << "StartThread started";
     while (!m_stop && m_usbHandle)
     {
         int transferred_o = 0;
-        int r_o = cyusb_bulk_transfer(m_usbHandle, out_endpoint, (unsigned char *)ABOIL.constData(), ABOIL.size(), &transferred_o, 1000);
+        int r_o = cyusb_bulk_transfer(m_usbHandle, out_endpoint, (unsigned char *)ABOIL.constData(), ABOIL.size(), &transferred_o, 5000);
         qDebug() << "r_o:" << r_o;
         if (r_o != 0)
         {
@@ -163,7 +202,6 @@ void WorkerThread::run()
             break;
         }
 
-        std::vector<unsigned char> chunk(4096 * 1000);
         int transferred_i = 0;
         int r_i = cyusb_bulk_transfer(m_usbHandle, in_endpoint, chunk.data(), chunk.size(), &transferred_i, 10000);
         qDebug() << "r_i:" << r_i << "transferred_i:" << transferred_i;
@@ -173,10 +211,9 @@ void WorkerThread::run()
             QByteArray data(reinterpret_cast<const char *>(chunk.data()), transferred_i);
             emit dataReceived(data);
         }
-        msleep(1100);
+        msleep(10);
     }
-    free(aligned_chunk);
-    qDebug() << "WorkerThread exited";
+    qDebug() << "StartThread exited";
 }
 
 QVector<float> MainWindow::convertToFloat32LittleEndian(const QByteArray &data)
@@ -199,42 +236,125 @@ QVector<float> MainWindow::convertToFloat32LittleEndian(const QByteArray &data)
     return buffer;
 }
 
-// QVector<quint16> MainWindow::convertTo16BitLittleEndian(const QByteArray &data)      //0701
-// {
-//     QVector<quint16> buffer(data.size() / 2);
-//     const unsigned char *raw = reinterpret_cast<const unsigned char *>(data.constData());
+CaptureThread::CaptureThread(cyusb_handle *handle, MainWindow *mainwindow) //, QObject *parent)
+    : QThread(mainwindow), h(handle), m_stop(false), m_mainwindow(mainwindow)
+{
+}
 
-//     for (int i = 0; i < buffer.size(); ++i)
-//     {
-//         quint16 low = raw[i * 2];
-//         quint16 high = raw[i * 2 + 1];
-//         buffer[i] = (high << 8) | low;
-//     }
-//     return buffer;
-// }
+void CaptureThread::stop()
+{
+    m_stop = true;
+}
 
-// QImage MainWindow::scale16BitTo8Bit(const QVector<quint16> &data, int width, int height)     //0701
-// {
-//     QImage img(width, height, QImage::Format_Grayscale8);
-//     if (data.size() != width * height)
-//     {
-//         qWarning() << "Data size mismatch";
-//         return img;
-//     }
+void CaptureThread::run()
+{
+    const int one_frame_size = 4096 * 1000;
+    int width = 1024, height = 1000;
+    int iii = 0;
+    int total_frames = 120;
+    int quant_num = 0;
 
-//     quint16 minVal = *std::min_element(data.constBegin(), data.constEnd());
-//     quint16 maxVal = *std::max_element(data.constBegin(), data.constEnd());
-//     float range = maxVal - minVal + 1;
+    selectedChunks.clear();
+    selectedIndices.clear();
+    qsrand(QTime::currentTime().msec()); 
 
-//     for (int i = 0; i < data.size(); ++i)
-//     {
-//         img.bits()[i] = static_cast<uchar>((data[i] - minVal) * 255 / range);
-//     }
-//     return img;
-// }
+    while (selectedIndices.size() < 1)		//number for model
+    {
+        selectedIndices.insert(qrand() % 100);
+    }
+    qDebug() << "selectedIndices : " << selectedIndices;
+    QByteArray ABOIL = QByteArray::fromHex("41424F494C000078"); // 78 : 120, 6E : 110
+    unsigned char out_endpoint = 0x01;
+    unsigned char in_endpoint = 0x81;
+    int transferred_o = 0;
 
-//****************************************************************************************************************** */
-//****************************************************************************************************************** */     //ver.1 use img.bits()[i] write in (1D)
+    int r_o = cyusb_bulk_transfer(h, out_endpoint, (unsigned char *)ABOIL.constData(), ABOIL.size(), &transferred_o, 1000);
+    if (r_o != 0)
+    {
+        emit captureError(QString("Send failed: %1").arg(r_o));
+        return;
+    }
+
+    while (!m_stop && iii < total_frames)
+    {
+        QElapsedTimer timer; // time calculate
+
+        std::vector<unsigned char> chunk(one_frame_size);
+        int transferred_i = 0;
+        int r_i = cyusb_bulk_transfer(h, in_endpoint, chunk.data(), one_frame_size, &transferred_i, 30000);
+        timer.start();
+        if (r_i != 0 || transferred_i != one_frame_size)
+        {
+            emit captureError(QString("Receive failed: %1").arg(r_i));
+            qDebug() << "[CaptureThread] Transfer failed! r_i =" << r_i
+                     << ", transferred_i =" << transferred_i
+                     << ", expected =" << one_frame_size;
+            break; 
+        }
+
+        QByteArray chunkData(reinterpret_cast<char *>(chunk.data()), transferred_i);
+        emit rawDataReceived_cap(chunkData);
+
+        QVector<float> floatData = m_mainwindow->convertToFloat32LittleEndian(chunkData);
+
+        QImage img(width, height, QImage::Format_Grayscale8);
+        double sum = 0.0;
+        int num = 0;
+        for (int y = height/2; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                sum += floatData[y * width + x];
+                ++num;
+            }
+        }
+        float half_noise = (num > 0) ? static_cast<float>(sum / num) : 0.0f;
+        float maxAfter = 0.0f;
+        for (int i = 0; i < floatData.size(); ++i) {
+            float v = floatData[i] - half_noise;
+            if (v > maxAfter) maxAfter = v;
+        }
+        float denom = (maxAfter > 1e-6f) ? maxAfter : 1e-6f;
+
+        for (int y = 0; y < height; ++y) {
+            uchar *scanLine = img.scanLine(y);
+            for (int x = 0; x < width; ++x) {
+                int idx = y * width + x;
+                float v = floatData[idx] - half_noise;
+                if (v < 0.0f) v = 0.0f;
+                int gray = static_cast<int>(255.0f * (v / denom));
+                scanLine[x] = static_cast<uchar>(qBound(0, gray, 255));
+            }
+        }
+
+        QVector<float> data4model = m_mainwindow->normalizeAndRotateFloatImage(floatData, width, height); // for training
+
+        if (selectedIndices.contains(iii))
+        {
+            QByteArray byteArray4model(reinterpret_cast<const char *>(floatData.constData()), floatData.size() * sizeof(float));
+            selectedChunks.append(byteArray4model);
+
+            QString fileName = QString("quant_raw/test/frame_%1.bin").arg(quant_num);
+            QFile file(fileName);
+            if (file.open(QIODevice::WriteOnly))
+            {
+                file.write(byteArray4model);
+                file.close();
+                qDebug() << "Saved instantly:" << fileName;
+            }
+            else
+            {
+                qDebug() << "Failed to open:" << fileName;
+            }
+            quant_num = quant_num + 1;
+        }
+
+        qint64 elapsed_ms = timer.elapsed();
+        emit oneFrameCaptured(img, elapsed_ms);
+        iii++;
+    }
+
+    emit captureFinished();
+}
+
 QImage MainWindow::scaleFloatTo8Bit(const QVector<float> &data, int width, int height)
 {
     QImage img(width, height, QImage::Format_Grayscale8);
@@ -244,121 +364,94 @@ QImage MainWindow::scaleFloatTo8Bit(const QVector<float> &data, int width, int h
         return img;
     }
 
-    float minVal = *std::min_element(data.constBegin(), data.constEnd());
-    float maxVal = *std::max_element(data.constBegin(), data.constEnd());
-    float range = maxVal - minVal + 1e-6; // 防止除以 0
+    double sum = 0.0;
+    int num = 0;
+    for (int y = height / 2; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            int idx = y * width + x;
+            sum += data[idx];
+            num++;
+        }
+    }
+    float half_noise = (num > 0) ? (sum / num) : 0.0f;
+
+    QVector<float> noiseRemoved(data.size());
+    for (int i = 0; i < data.size(); ++i)
+    {
+        float v = data[i] - half_noise;
+        noiseRemoved[i] = (v < 0) ? 0.0f : v;
+    }
+
+    float maxVal = *std::max_element(noiseRemoved.constBegin(), noiseRemoved.constEnd());
 
     for (int i = 0; i < data.size(); ++i)
     {
-        img.bits()[i] = static_cast<uchar>((data[i] - minVal) * 255.0f / range);
+        img.bits()[i] = (maxVal > 1e-6f) ? static_cast<uchar>(noiseRemoved[i] * 255.0f / maxVal) : 0;
     }
+
     return img;
 }
-//****************************************************************************************************************** */
-//****************************************************************************************************************** */
 
-//****************************************************************************************************************** */
-//****************************************************************************************************************** */     //ver.2 use scanline(y) write in(2D)
-// QImage MainWindow::scaleFloatTo8Bit(const QVector<float> &data, int width, int height)
-// {
-//     QImage img(width, height, QImage::Format_Grayscale8);
-//     if (data.size() != width * height)
-//     {
-//         qWarning() << "Data size mismatch";
-//         return img;
-//     }
 
-//     float minVal = *std::min_element(data.constBegin(), data.constEnd());
-//     float maxVal = *std::max_element(data.constBegin(), data.constEnd());
-//     float range = maxVal - minVal + 1e-6;
-
-//     for (int y = 0; y < height; ++y)
-//     {
-//         const float *src = data.constData() + y * width;
-//         uchar *dst = img.scanLine(y);
-//         for (int x = 0; x < width; ++x)
-//         {
-//             float normalized = (src[x] - minVal) / range;
-//             dst[x] = static_cast<uchar>(normalized * 255.0f);
-//         }
-//     }
-//     return img;
-// }
-//****************************************************************************************************************** */
-//****************************************************************************************************************** */
-
-// QImage MainWindow::scaleTo8Bit(const QVector<quint16> &data)     //0701
-// {
-//     QImage img(GUI_display_width, GUI_display_height, QImage::Format_Grayscale8);
-
-//     quint16 minVal = *std::min_element(data.constBegin(), data.constEnd());
-//     quint16 maxVal = *std::max_element(data.constBegin(), data.constEnd());
-//     float range = maxVal - minVal + 1;
-
-//     for (int y = 0; y < GUI_display_height; ++y)
-//     {
-//         const quint16 *src = data.constData() + y * GUI_display_width;
-//         uchar *dst = img.scanLine(y);
-//         for (int x = 0; x < GUI_display_width; ++x)
-//         {
-//             float normalized = (src[x] - minVal) / range;
-//             dst[x] = static_cast<uchar>(normalized * 255.0f);
-//         }
-//     }
-//     return img;
-// }
-
-QImage MainWindow::scaleTo8Bit(const QVector<float> &data)
+QVector<float> MainWindow::normalizeAndRotateFloatImage(const QVector<float> &inputData, int width, int height)
 {
-    QImage img(GUI_display_width, GUI_display_height, QImage::Format_Grayscale8);
 
-    float minVal = *std::min_element(data.constBegin(), data.constEnd());
-    float maxVal = *std::max_element(data.constBegin(), data.constEnd());
-    float range = maxVal - minVal + 1;
-
-    for (int y = 0; y < GUI_display_height; ++y)
+    if (inputData.size() != width * height)
     {
-        const float *src = data.constData() + y * GUI_display_width;
-        uchar *dst = img.scanLine(y);
-        for (int x = 0; x < GUI_display_width; ++x)
+        qWarning() << "Data size mismatch";
+        return {};
+    }
+
+    double sum = 0.0;
+    int num = 0;
+    for (int y = height / 2; y < height; ++y) 
+    {
+        for (int x = 0; x < width; ++x)
         {
-            float normalized = (src[x] - minVal) / range;
-            dst[x] = static_cast<uchar>(normalized * 255.0f);
+            int idx = y * width + x;
+            sum += inputData[idx];
+            num++;
         }
     }
-    return img;
+    float half_noise = (num > 0) ? (sum / num) : 0.0f;
+
+    QVector<float> noiseRemoved(inputData.size());
+    for (int i = 0; i < inputData.size(); ++i)
+    {
+        float v = inputData[i] - half_noise;
+        noiseRemoved[i] = (v < 0) ? 0.0f : v;
+    }
+
+    float maxVal = *std::max_element(noiseRemoved.constBegin(), noiseRemoved.constEnd());
+
+    QVector<float> normalized(inputData.size());
+    for (int i = 0; i < inputData.size(); ++i)
+    {
+        normalized[i] = (maxVal > 1e-6f) ? (noiseRemoved[i] * 255.0f / maxVal) : 0.0f;
+    }
+
+    QVector<float> rotated(inputData.size());
+    for (int y = 0; y < height; ++y)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            int srcIndex = y * width + x;
+            int dstIndex = x * height + (height - 1 - y);
+            rotated[dstIndex] = normalized[srcIndex];
+        }
+    }
+
+    return rotated;
 }
 
-// QImage MainWindow::generateEnfaceImage(int height)
-// {
-//     if (m_imageStack.isEmpty() || height < 0 || height >= GUI_display_height)
-//     {
-//         qDebug() << "Invalid parameters for enface image generation";
-//         return QImage();
-//     }
-
-//     QImage enfaceImg(GUI_display_width, m_imageStack.size(), QImage::Format_Grayscale8);
-//     enfaceImg.fill(0);
-
-//     for (int i = 0; i < m_imageStack.size(); ++i)
-//     {
-//         const QImage &srcImg = m_imageStack[i];
-//         if (srcImg.width() != GUI_display_width || srcImg.height() != GUI_display_height)
-//         {
-//             qWarning() << "Image size mismatch in enface generation";
-//             return QImage();
-//         }
-
-//         const uchar *srcLine = srcImg.scanLine(height);
-//         uchar *dstLine = enfaceImg.scanLine(i);
-//         memcpy(dstLine, srcLine, GUI_display_width);
-//     }
-
-//     return enfaceImg;
-// }
 
 QImage MainWindow::generateEnfaceImage(int column)
 {
+    QElapsedTimer timer_enface; // time calculate
+    timer_enface.start();
+
     int width = 1024;
     if (m_imageStack.isEmpty() || column < 0 || column >= width)
     {
@@ -384,7 +477,8 @@ QImage MainWindow::generateEnfaceImage(int column)
             dstLine[i] = srcLine[column];
         }
     }
-
+    qint64 elapsed_enface_ms = timer_enface.elapsed();
+    qDebug() << "time to generate enface: " << elapsed_enface_ms << "ms";
     return enfaceImg;
 }
 
@@ -395,99 +489,7 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
         QWheelEvent *wheelEvent = static_cast<QWheelEvent *>(event);
         qreal scaleFactor = (wheelEvent->angleDelta().y() > 0) ? 1.05 : 0.95;
         ui->display_3->scale(scaleFactor, scaleFactor);
-        // qDebug() << "[INFO] Display3 scaled by factor:" << scaleFactor;
         return true;
     }
     return QMainWindow::eventFilter(obj, event);
 }
-
-/*
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), ui(new Ui::MainWindow),
-      m_workerMutex(QMutex::NonRecursive), m_loopMutex(QMutex::NonRecursive),
-      currentScene(new QGraphicsScene(this)), m_display2Scene(new QGraphicsScene(this)),
-      m_display3Scene(new QGraphicsScene(this)), h(nullptr)
-{
-    ui->setupUi(this);
-
-    // Open USB device
-    int device_count = cyusb_open();
-    if (device_count < 1) {
-        qCritical() << "[ERROR] No USB device found";
-        h = nullptr;
-        return;
-    }
-
-    // Obtain device handle
-    h = cyusb_gethandle(0);
-    if (!h) {
-        qCritical() << "[ERROR] Failed to obtain USB device handle";
-        cyusb_close();
-        h = nullptr;
-        return;
-    }
-
-    // Detach kernel driver
-    int interface = 0;
-    if (cyusb_kernel_driver_active(h, interface)) {
-        if (cyusb_detach_kernel_driver(h, interface) != 0) {
-            qCritical() << "[ERROR] Failed to detach kernel driver";
-            cyusb_close();
-            h = nullptr;
-            return;
-        }
-    }
-
-    // Claim interface
-    if (cyusb_claim_interface(h, interface) != 0) {
-        qCritical() << "[ERROR] Failed to claim interface";
-        cyusb_close();
-        h = nullptr;
-        return;
-    }
-
-    qDebug() << "[INFO] USB initialized successfully";
-
-    // Initialize displays
-    ui->display_1->setScene(currentScene);
-    ui->display_2->setScene(m_display2Scene);
-    ui->display_3->setScene(m_display3Scene);
-
-    // Initialize sliders
-    ui->slider_x->setEnabled(false);
-    ui->slider_x->setRange(0, 0);
-    ui->slider_y->setEnabled(false);
-    ui->slider_y->setRange(0, GUI_display_height - 1);
-
-    // Connect signals and slots
-    connect(ui->pb_start, &QPushButton::clicked, this, &MainWindow::pb_start_clicked);
-    connect(ui->pb_stop, &QPushButton::clicked, this, &MainWindow::pb_stop_clicked);
-    connect(ui->pb_capture, &QPushButton::clicked, this, &MainWindow::pb_capture_clicked);
-    connect(ui->pb_save, &QPushButton::clicked, this, &MainWindow::pb_save_clicked);
-    connect(ui->slider_x, &QSlider::valueChanged, this, &MainWindow::slider_x_valueChanged);
-    connect(ui->slider_y, &QSlider::valueChanged, this, &MainWindow::slider_y_valueChanged);
-}
-
-MainWindow::~MainWindow()
-{
-    if (m_worker) {
-        m_worker->stop();
-        m_worker->wait();
-        delete m_worker;
-    }
-    if (h) {
-        cyusb_release_interface(h, 0);
-        cyusb_close();
-    }
-    delete ui;
-}
-
-WorkerThread::WorkerThread(cyusb_handle *usbHandle, MainWindow *parent)
-    : QThread(parent), m_stop(false), m_usbHandle(usbHandle), m_parent(parent) {}
-
-void WorkerThread::stop()
-{
-    m_stop = true;
-    qDebug() << "WorkerThread stop requested";
-}
-*/

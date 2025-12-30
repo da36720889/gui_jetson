@@ -2,7 +2,7 @@ QT       += core gui
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
-CONFIG += c++17
+CONFIG += c++17\	thread
 
 # You can make your code fail to compile if it uses deprecated APIs.
 # In order to do so, uncomment the following line.
@@ -23,4 +23,11 @@ qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 
-RESOURCES +=
+LIBS		+= -L../lib -lcyusb -lusb-1.0
+
+
+INCLUDEPATH += ../include
+#unix:!macx: LIBS += -L$$PWD/../../libusb-1.0.27/MinGW64/ -llibusb-1.0
+
+#INCLUDEPATH += $$PWD/../../libusb-1.0.27/MinGW64/static
+#DEPENDPATH += $$PWD/../../libusb-1.0.27/MinGW64/static
