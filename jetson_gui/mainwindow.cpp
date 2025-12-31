@@ -113,7 +113,7 @@ MainWindow::MainWindow(QWidget *parent)
     
     // **************** python fastapi ************************* //
     pythonFastApi = new QProcess(this);
-    pythonFastApi->start("python3", QStringList() << "workspace/Inference/eval_fastapi_bin.py");
+    pythonFastApi->start("python3", QStringList() << "workspace/Inference/eval_fastapi_tensorrt_multiprocess_opencv.py");
 
     connect(pythonFastApi, &QProcess::readyReadStandardOutput, [=]() {
         QByteArray output = pythonFastApi->readAllStandardOutput();
@@ -133,7 +133,7 @@ MainWindow::MainWindow(QWidget *parent)
     pythonFastApi->start();
 
     if (!pythonFastApi->waitForStarted(1000000)) {
-        qCritical() << "[ERROR] Failed to start eval_fastapi_bin.py";
+        qCritical() << "[ERROR] Failed to start eval_fastapi_tensorrt_multiprocess_opencv.py";
     } else {
         qDebug() << "[INFO] Background Python process started.";
     }
