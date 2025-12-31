@@ -291,3 +291,10 @@ The application expects the following directory structure:
 - All data processing uses little-endian byte order
 - **Qt Version**: Originally designed for Qt 4, but adapted for Qt 5 on JetPack 5.x. Some manual code adjustments may be required for full compatibility.
 
+## Author
+
+Y.T. Tsai
+
+## Version History
+
+- v0.01 - Initial version
